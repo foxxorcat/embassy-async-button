@@ -1,0 +1,29 @@
+[package]
+name = "embassy-async-button"
+version = "0.1.0"
+edition = "2021"
+authors = ["foxxorcat"]
+description = "Async button handling crate for no_std environments"
+keywords = ["no_std", "async", "embassy", "button", "embedded"]
+categories = ["no-std", "embedded", "asynchronous"]
+repository = "https://github.com/foxxorcat/embassy-async-button"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+embassy-time = { version = "0.4.0" }
+embedded-hal-async = "1.0.0"
+embedded-hal = "1.0.0"
+defmt = { version = "0.3.5", optional = true }
+
+embassy-futures = "0.1.1"
+embassy-sync = "0.7.0"
+
+[dev-dependencies]
+embassy-time = { version = "0.4.0", features = ["generic-queue-8", "std"] }
+embassy-sync = "0.7.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+[features]
+default = []
+defmt = ["dep:defmt", "embassy-time/defmt", "embassy-futures/defmt", "embassy-sync/defmt"]
