@@ -1,8 +1,8 @@
 pub mod adc;
+pub mod adc_keypad;
 pub mod config;
 pub mod gpio;
 pub mod matrix;
-pub mod adc_keypad;
 
 pub use config::*;
 
@@ -135,5 +135,17 @@ impl<T: AsyncButtonDriver> Button<T> {
                 }
             }
         }
+    }
+
+    pub fn set_config(&mut self, new_config: ButtonConfig) {
+        self.config = new_config;
+    }
+
+    pub fn driver(&self) -> &T {
+        &self.press_source
+    }
+
+    pub fn driver_mut(&mut self) -> &mut T {
+        &mut self.press_source
     }
 }

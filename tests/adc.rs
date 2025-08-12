@@ -1,6 +1,6 @@
 use core::convert::Infallible;
 use embassy_async_button::{
-    adc::{filter::RawFilter, AdcButtonGroup, AsyncAdc},
+    adc::{filter::RawFilter, AdcDriver, AsyncAdc},
     config::ButtonConfig,
     Button, ButtonEvent,
 };
@@ -61,17 +61,17 @@ async fn test_adc_single_click() {
     let config = ButtonConfig::default();
 
     // 1. 创建 ADC 按钮组，使用最简单的 RawFilter
-    let group = AdcButtonGroup::new(adc, RawFilter::default(), &CHANNEL);
+    let  (runner, factory) = AdcDriver::new(adc, RawFilter::default(), &CHANNEL);
 
     // 2. 从组中创建一个具体的 ADC 按钮实例
-    let adc_driver = group.simple_button(THRESHOLD_LOW, THRESHOLD_HIGH);
+    let adc_driver = factory.button(THRESHOLD_LOW, THRESHOLD_HIGH);
 
     // 3. 将 ADC 按钮驱动包装在通用的 Button 逻辑中
     let mut button = Button::new(adc_driver, config);
 
     // --- 运行测试 ---
     // 在后台运行 ADC 读取和滤波循环
-    let group_task = tokio::spawn(group.run());
+    let group_task = tokio::spawn(runner.run());
 
     // 在后台运行电压模拟器
     let simulator_task = tokio::spawn(voltage_simulator(sender, PRESS_VOLTAGE));

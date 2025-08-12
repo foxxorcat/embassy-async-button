@@ -59,10 +59,8 @@ async fn button_task(pin: Input<'static, GpioPin>) {
 
 ```rust,ignore
 use async_button::{
-    adc::{
-        filter::RawFilter,
-        adc_keypad::{KeyDecoder, KeypadDriverGroup, KeymaskChannel},
-    },
+    adc::{filter::RawFilter, AdcDriver},
+    adc_keypad::{KeyDecoder, KeypadDriver, KeymaskChannel},
     config::ButtonConfig,
     Button, ButtonEvent,
 };
@@ -84,33 +82,41 @@ impl KeyDecoder for MyKeypadDecoder {
 }
 
 #[embassy_executor::task]
-async fn keypad_task(adc: Adc<'static, embassy_rp::peripherals::ADC>) {
+async fn keypad_task(adc: Adc<'static, embassy_rp::peripherals::ADC>, spawner: Spawner) {
     // 2. 创建一个专用的通道，用于发布解码后的位掩码
     static KEYMASK_CHANNEL: KeymaskChannel<4, 4, 4> = KeymaskChannel::new();
 
-    // 3. 创建并运行第一层：KeypadDriverGroup
-    //    它在后台持续运行，将ADC值解码后发布出去。
-    let keypad_group = KeypadDriverGroup::new(
+    // 3. 调用 new()，一步到位地创建出 Driver 和 Factory
+    let (driver, factory) = KeypadDriver::new(
         adc,
         RawFilter::default(),
         MyKeypadDecoder,
         &KEYMASK_CHANNEL,
     );
-    spawner.spawn(keypad_group_task(keypad_group)).unwrap();
 
-    // 4. 为您关心的每一个按键创建独立的 Button 实例
-    let mut button_0 = Button::new(keypad_group.button(0), ButtonConfig::default());
-    let mut button_1 = Button::new(keypad_group.button(1), ButtonConfig::default());
+    // 4. 将 Driver (执行器) spawn 到后台任务中运行
+    spawner.spawn(keypad_driver_task(driver)).unwrap();
 
-    // 5. 在主逻辑中分别处理每个按键的高级事件
+    // 5. 使用 Factory (控制器) 在主逻辑中创建您需要的按钮实例
+    let mut button_0 = Button::new(factory.button(0), ButtonConfig::default());
+    let mut button_1 = Button::new(factory.button(1), ButtonConfig::default());
+
+    // 6. 在主逻辑中分别处理每个按键的高级事件
     loop {
         // ... 使用 select! 同时等待 button_0 和 button_1 的事件 ...
+
+        // 可以在这里动态修改配置
+        if some_condition {
+            let mut new_config = ButtonConfig::default();
+            new_config.long_press_time = embassy_time::Duration::from_secs(2);
+            button_0.set_config(new_config);
+        }
     }
 }
 
 #[embassy_executor::task]
-async fn keypad_group_task(group: KeypadDriverGroup<'static, ...>) {
-    group.run().await;
+async fn keypad_driver_task(driver: KeypadDriver<'static, ...>) {
+    driver.run().await;
 }
 ```
 

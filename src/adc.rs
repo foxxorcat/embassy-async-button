@@ -1,6 +1,6 @@
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
-    pubsub::{PubSubChannel, Subscriber},
+    pubsub::{PubSubChannel, Publisher, Subscriber},
 };
 
 use crate::AsyncButtonDriver;
@@ -85,9 +85,39 @@ pub type AdcChannel<'a, const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBE
     PubSubChannel<CriticalSectionRawMutex, u16, MSG_CAP, SUBS, SUBSCRIBER_CAP>;
 pub type AdcSubscriber<'a, const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBER_CAP: usize> =
     Subscriber<'a, CriticalSectionRawMutex, u16, MSG_CAP, SUBS, SUBSCRIBER_CAP>;
+pub type AdcPublisher<'a, const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBER_CAP: usize> =
+    Publisher<'a, CriticalSectionRawMutex, u16, MSG_CAP, SUBS, SUBSCRIBER_CAP>;
 
-/// ADC按钮组，其职责是纯粹地运行ADC采样和滤波任务。
-pub struct AdcButtonGroup<
+/// 【按键工厂】用于创建简单的ADC按钮，可被克隆并在程序各处使用。
+#[derive(Clone)]
+pub struct SimpleAdcButtonFactory<
+    'a,
+    const MSG_CAP: usize,
+    const SUBS: usize,
+    const SUBSCRIBER_CAP: usize,
+> {
+    channel: &'a AdcChannel<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>,
+}
+
+impl<'a, const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBER_CAP: usize>
+    SimpleAdcButtonFactory<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>
+{
+    /// 创建一个基于阈值的简单ADC按钮。
+    pub fn button(
+        &self,
+        threshold_low: u16,
+        threshold_high: u16,
+    ) -> SimpleAdcButton<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP> {
+        SimpleAdcButton {
+            subscriber: self.channel.subscriber().unwrap(),
+            threshold_low,
+            threshold_high,
+        }
+    }
+}
+
+/// 【后台驱动器】拥有硬件资源，并提供 run 方法以在后台任务中运行。
+pub struct AdcDriver<
     'a,
     ADC: AsyncAdc,
     F: AdcFilter,
@@ -97,7 +127,7 @@ pub struct AdcButtonGroup<
 > {
     adc: ADC,
     filter: F,
-    channel: &'a AdcChannel<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>,
+    publisher: AdcPublisher<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>,
 }
 
 impl<
@@ -107,71 +137,47 @@ impl<
         const MSG_CAP: usize,
         const SUBS: usize,
         const SUBSCRIBER_CAP: usize,
-    > AdcButtonGroup<'a, ADC, F, MSG_CAP, SUBS, SUBSCRIBER_CAP>
+    > AdcDriver<'a, ADC, F, MSG_CAP, SUBS, SUBSCRIBER_CAP>
 {
+    /// 创建一个新的ADC驱动及其关联的按键工厂。
+    ///
+    /// 这是设置简单ADC按钮的唯一入口点。
+    ///
+    /// # 返回
+    /// 一个元组，包含:
+    /// - `AdcDriver`: 需要被 spawn 到后台任务中运行。
+    /// - `SimpleAdcButtonFactory`: 用于在程序中创建具体的按键实例。
     pub fn new(
         adc: ADC,
         filter: F,
-        channel: &'a AdcChannel<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>,
-    ) -> Self {
-        Self {
+        channel: &'a AdcChannel<MSG_CAP, SUBS, SUBSCRIBER_CAP>,
+    ) -> (Self, SimpleAdcButtonFactory<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>) {
+        let driver = Self {
             adc,
             filter,
-            channel,
-        }
+            publisher: channel.publisher().unwrap(),
+        };
+        let factory = SimpleAdcButtonFactory { channel };
+        (driver, factory)
     }
 
-    /// 工厂方法：创建一个与此组关联的SimpleAdcButton实例。
-    pub fn simple_button(
-        &self,
-        threshold_low: u16,
-        threshold_high: u16,
-    ) -> SimpleAdcButton<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP> {
-        SimpleAdcButton::new(
-            self.channel.subscriber().unwrap(),
-            threshold_low,
-            threshold_high,
-        )
-    }
-
-    /// 运行ADC读取和滤波循环。
     pub async fn run(mut self) -> ! {
-        let publisher = self.channel.publisher().unwrap();
         loop {
             if let Ok(raw_value) = self.adc.read().await {
                 if let Some(filtered_value) = self.filter.process(raw_value) {
-                    // 只有当滤波器产出有效值时，才发布
-                    publisher.publish(filtered_value).await;
+                    self.publisher.publish(filtered_value).await;
                 }
             }
-            // 采样周期的延迟由滤波器内部的 inter_sample_delay 控制
             self.filter.inter_sample_delay().await;
         }
     }
 }
 
-/// 一个简单的、基于电压范围的ADC按钮，消费已被上游完全处理好的数据。
 pub struct SimpleAdcButton<'a, const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBER_CAP: usize>
 {
     subscriber: AdcSubscriber<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>,
     threshold_low: u16,
     threshold_high: u16,
-}
-
-impl<'a, const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBER_CAP: usize>
-    SimpleAdcButton<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>
-{
-    pub fn new(
-        subscriber: AdcSubscriber<'a, MSG_CAP, SUBS, SUBSCRIBER_CAP>,
-        threshold_low: u16,
-        threshold_high: u16,
-    ) -> Self {
-        Self {
-            subscriber,
-            threshold_low,
-            threshold_high,
-        }
-    }
 }
 
 impl<const MSG_CAP: usize, const SUBS: usize, const SUBSCRIBER_CAP: usize> AsyncButtonDriver

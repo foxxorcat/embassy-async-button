@@ -1,10 +1,10 @@
+use core::convert::Infallible;
 use embassy_async_button::{
     adc::{filter::RawFilter, AsyncAdc},
-    adc_keypad::{KeyDecoder, KeymaskChannel, KeypadDriverGroup},
+    adc_keypad::{KeyDecoder, KeymaskChannel, KeypadDriver},
     config::ButtonConfig,
     Button, ButtonEvent,
 };
-use core::convert::Infallible;
 use tokio::sync::watch;
 
 // --- 模拟硬件与解码器 ---
@@ -58,7 +58,7 @@ async fn test_keypad_button_integration() {
     static KEYMASK_CHANNEL: KeymaskChannel<4, 4, 4> = KeymaskChannel::new();
 
     // 3. 实例化第一层：`KeypadDriverGroup`，负责从ADC读取并发布位掩码。
-    let keypad_group = KeypadDriverGroup::new(
+    let (runner, factory) = KeypadDriver::new(
         adc,
         RawFilter::default(), // 使用最简单的原始值滤波器
         MyTestKeypadDecoder,
@@ -66,7 +66,7 @@ async fn test_keypad_button_integration() {
     );
 
     // 4. 从 group 中为 `key ID 1` 创建一个第二层实例：`KeypadButton`。
-    let keypad_button_driver = keypad_group.button(1);
+    let keypad_button_driver = factory.button(1);
 
     // 5. 将第二层驱动包装进最终的 `Button` 逻辑中，以获得高级事件处理能力。
     let mut button = Button::new(keypad_button_driver, ButtonConfig::default());
@@ -74,7 +74,7 @@ async fn test_keypad_button_integration() {
     // --- 执行阶段 ---
 
     // 在后台tokio任务中运行 `KeypadDriverGroup` 的主循环。
-    let group_task = tokio::spawn(keypad_group.run());
+    let group_task = tokio::spawn(runner.run());
 
     // 在另一个后台任务中模拟物理电压的变化，模拟对“按键1”的一次完整点击。
     let simulator_task = tokio::spawn(async move {

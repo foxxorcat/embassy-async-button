@@ -1,13 +1,10 @@
+use core::convert::Infallible;
 use embassy_async_button::{
     config::ButtonConfig,
-    matrix::{KeyEvent, MatrixKeyboardGroup},
+    matrix::{KeyEvent, MatrixDriver},
     Button, ButtonEvent,
 };
-use core::convert::Infallible;
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    pubsub::PubSubChannel,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::PubSubChannel};
 use embassy_time::{Duration, Timer};
 use std::sync::{Arc, Mutex}; // 【新】引入 Arc 和 std::sync::Mutex
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -95,34 +92,44 @@ async fn test_matrix_single_click() {
     let (col_sender, col_receiver) = mpsc::unbounded_channel();
 
     // 1. 创建共享状态的数组
-    let rows_state: [Arc<Mutex<bool>>; ROWS] =
-        std::array::from_fn(|_| Arc::new(Mutex::new(false)));
+    let rows_state: [Arc<Mutex<bool>>; ROWS] = std::array::from_fn(|_| Arc::new(Mutex::new(false)));
 
     // 2. 创建 Mock 引脚，它们都引用共享状态
     let cols: [MockOutputPin; COLS] = [
-        MockOutputPin { col_index: 0, sender: col_sender.clone() },
-        MockOutputPin { col_index: 1, sender: col_sender.clone() },
+        MockOutputPin {
+            col_index: 0,
+            sender: col_sender.clone(),
+        },
+        MockOutputPin {
+            col_index: 1,
+            sender: col_sender.clone(),
+        },
     ];
     let rows: [MockInputPin; ROWS] = [
-        MockInputPin { state: rows_state[0].clone() },
-        MockInputPin { state: rows_state[1].clone() },
+        MockInputPin {
+            state: rows_state[0].clone(),
+        },
+        MockInputPin {
+            state: rows_state[1].clone(),
+        },
     ];
 
     // --- 设置 async-button ---
-    static CHANNEL: PubSubChannel<CriticalSectionRawMutex, KeyEvent, 4, 4, 4> = PubSubChannel::new();
+    static CHANNEL: PubSubChannel<CriticalSectionRawMutex, KeyEvent, 4, 4, 4> =
+        PubSubChannel::new();
     let config = ButtonConfig::default();
 
     // 1. 创建矩阵键盘组
-    let group = MatrixKeyboardGroup::new(cols, rows, &CHANNEL);
+    let (runner, factory) = MatrixDriver::new(cols, rows, &CHANNEL);
 
     // 2. 从组中创建一个具体的按钮实例
-    let matrix_driver = group.button(KEY_TO_TEST.0, KEY_TO_TEST.1);
+    let matrix_driver = factory.button(KEY_TO_TEST.0, KEY_TO_TEST.1);
 
     // 3. 将矩阵按钮驱动包装在通用的 Button 逻辑中
     let mut button = Button::new(matrix_driver, config);
 
     // --- 运行测试 ---
-    let group_task = tokio::spawn(group.run());
+    let group_task = tokio::spawn(runner.run());
     let simulator_task = tokio::spawn(matrix_simulator(col_receiver, rows_state, KEY_TO_TEST));
 
     // 在主任务中验证事件
