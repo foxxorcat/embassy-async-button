@@ -1,3 +1,6 @@
+#![no_std]
+#![allow(async_fn_in_trait)]
+
 pub mod adc;
 pub mod adc_keypad;
 pub mod config;
@@ -5,11 +8,9 @@ pub mod gpio;
 pub mod matrix;
 
 pub use config::*;
-
 use embassy_futures::select::{select, Either};
 use embassy_time::{Instant, Timer};
 
-// 从 config 模块导入 ButtonConfig
 use crate::config::ButtonConfig;
 
 /// 一个trait，抽象了所有可以提供异步“按下”和“释放”事件的硬件源。
@@ -18,7 +19,6 @@ pub trait AsyncButtonDriver {
     async fn wait_for_release(&mut self);
 }
 
-/// 按钮可能产生的逻辑事件类型。
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonEvent {
@@ -30,90 +30,128 @@ pub enum ButtonEvent {
     LongPressRelease,
 }
 
-/// 按钮的内部状态机。
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+enum ButtonState {
     Idle,
-    Debouncing,
-    Pressed {
-        press_time: Instant,
-    },
-    WaitingForNextClick {
+    PressDebouncing {
         count: u8,
-        last_release_time: Instant,
+        start_time: Instant,
     },
-    LongPress,
+    Pressed {
+        start_time: Instant,
+        count: u8,
+    },
+    ReleaseDebouncing {
+        count: u8,
+        press_start: Instant,
+        release_start: Instant,
+    },
+    WaitingForMultiClick {
+        count: u8,
+        last_release: Instant,
+    },
+    LongPress {
+        start_time: Instant,
+    },
 }
 
 pub struct Button<T: AsyncButtonDriver> {
-    press_source: T,
+    driver: T,
     config: ButtonConfig,
-    state: State,
+    state: ButtonState,
 }
 
 impl<T: AsyncButtonDriver> Button<T> {
-    pub fn new(press_source: T, config: ButtonConfig) -> Self {
+    pub fn new(driver: T, config: ButtonConfig) -> Self {
         Self {
-            press_source,
+            driver,
             config,
-            state: State::Idle,
+            state: ButtonState::Idle,
         }
     }
 
-    /// 异步获取下一个按钮事件。
     pub async fn next_event(&mut self) -> ButtonEvent {
         loop {
             match self.state {
-                State::Idle => {
-                    self.press_source.wait_for_press().await;
-                    self.state = State::Debouncing;
+                ButtonState::Idle => {
+                    self.driver.wait_for_press().await;
+                    self.state = ButtonState::PressDebouncing {
+                        count: 0,
+                        start_time: Instant::now(),
+                    };
                 }
-                State::Debouncing => {
-                    let debounce_timer = Timer::after(self.config.debounce);
-                    match select(self.press_source.wait_for_release(), debounce_timer).await {
+
+                ButtonState::PressDebouncing { count, start_time } => {
+                    let debounce_timer = Timer::at(start_time + self.config.debounce);
+                    match select(self.driver.wait_for_release(), debounce_timer).await {
                         Either::First(_) => {
-                            self.state = State::Idle;
+                            self.state = ButtonState::Idle;
                         }
                         Either::Second(_) => {
-                            self.state = State::Pressed {
-                                press_time: Instant::now(),
+                            self.state = ButtonState::Pressed {
+                                start_time: Instant::now(),
+                                count: count + 1,
                             };
                         }
                     }
                 }
-                State::Pressed { press_time } => {
-                    let long_press_timer = Timer::at(press_time + self.config.long_press_time);
-                    match select(self.press_source.wait_for_release(), long_press_timer).await {
+
+                ButtonState::Pressed { start_time, count } => {
+                    let long_press_timer = Timer::at(start_time + self.config.long_press_time);
+                    match select(self.driver.wait_for_release(), long_press_timer).await {
                         Either::First(_) => {
-                            self.state = State::WaitingForNextClick {
-                                count: 1,
-                                last_release_time: Instant::now(),
+                            self.state = ButtonState::ReleaseDebouncing {
+                                count,
+                                press_start: start_time,
+                                release_start: Instant::now(),
                             };
                         }
                         Either::Second(_) => {
-                            self.state = State::LongPress;
+                            self.state = ButtonState::LongPress {
+                                start_time,
+                            };
                             return ButtonEvent::LongPressStart;
                         }
                     }
                 }
-                State::WaitingForNextClick {
-                    count,
-                    last_release_time,
-                } => {
-                    let multi_click_timer =
-                        Timer::at(last_release_time + self.config.multi_click_window);
-                    match select(self.press_source.wait_for_press(), multi_click_timer).await {
+
+                ButtonState::ReleaseDebouncing { count, press_start, release_start } => {
+                    let debounce_timer = Timer::at(release_start + self.config.debounce);
+                    match select(self.driver.wait_for_press(), debounce_timer).await {
                         Either::First(_) => {
-                            self.press_source.wait_for_release().await;
-                            self.state = State::WaitingForNextClick {
-                                count: count + 1,
-                                last_release_time: Instant::now(),
+                            self.state = ButtonState::Pressed {
+                                start_time: press_start,
+                                count,
                             };
                         }
                         Either::Second(_) => {
-                            self.state = State::Idle;
-                            return match count {
+                            self.state = ButtonState::WaitingForMultiClick {
+                                count,
+                                last_release: release_start,
+                            };
+                        }
+                    }
+                }
+
+                ButtonState::WaitingForMultiClick {
+                    count,
+                    last_release,
+                } => {
+                    let multi_click_timer = Timer::at(last_release + self.config.multi_click_window);
+                    match select(self.driver.wait_for_press(), multi_click_timer).await {
+                        Either::First(_) => {
+                            self.state = ButtonState::PressDebouncing {
+                                count,
+                                start_time: Instant::now(),
+                            };
+                        }
+                        Either::Second(_) => {
+                            self.state = ButtonState::Idle;
+                           return match count {
+                                0 => {
+                                    // 如果 count 为 0 (来自长按释放)，则不产生事件，直接继续循环
+                                    continue;
+                                }
                                 1 => ButtonEvent::Click,
                                 2 => ButtonEvent::DoubleClick,
                                 n => ButtonEvent::MultipleClick { count: n },
@@ -121,14 +159,22 @@ impl<T: AsyncButtonDriver> Button<T> {
                         }
                     }
                 }
-                State::LongPress => {
-                    let hold_timer = Timer::after(self.config.long_press_hold_interval);
-                    match select(self.press_source.wait_for_release(), hold_timer).await {
+
+                ButtonState::LongPress { start_time } => {
+                    // 计算下一次保持事件的时间点
+                    let next_hold_time = start_time + self.config.long_press_hold_interval;
+                    let hold_timer = Timer::at(next_hold_time);
+                    
+                    match select(self.driver.wait_for_release(), hold_timer).await {
                         Either::First(_) => {
-                            self.state = State::Idle;
+                            self.state = ButtonState::Idle;
                             return ButtonEvent::LongPressRelease;
                         }
                         Either::Second(_) => {
+                            // 更新开始时间为下一次保持事件的时间点
+                            self.state = ButtonState::LongPress {
+                                start_time: next_hold_time,
+                            };
                             return ButtonEvent::LongPressHold;
                         }
                     }
@@ -140,12 +186,19 @@ impl<T: AsyncButtonDriver> Button<T> {
     pub fn set_config(&mut self, new_config: ButtonConfig) {
         self.config = new_config;
     }
-
+    
+    /// 获取底层驱动的不可变引用
     pub fn driver(&self) -> &T {
-        &self.press_source
+        &self.driver
     }
 
+    /// 获取底层驱动的可变引用
     pub fn driver_mut(&mut self) -> &mut T {
-        &mut self.press_source
+        &mut self.driver
+    }
+    
+    /// 重置按钮状态到初始空闲状态
+    pub fn reset(&mut self) {
+        self.state = ButtonState::Idle;
     }
 }
